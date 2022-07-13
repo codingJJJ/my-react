@@ -5,7 +5,9 @@ let currentRoot = null, // 当前根Fiber
     workInProgressFiber, // 用于函数fiber的hook
     hookIndex = 0,
     // 收集Effect Tag为DELET的fiber
-    deletions = [];
+    deletions = [],
+    currentEffect = []; // 收集useEffect hook
+
 const CLASS_COMPONENT = 'CLASS_COMPONENT',
     FUNCTION_COMPONENT = 'FUNCTION_COMPONENT',
     REACT_ELEMENT = 'REACT_ELEMENT',
@@ -52,7 +54,21 @@ function workLoop() {
     }
     if (!nextUnitWork && workInProgress) {
         // 当nextUnitWork为null时 说明工作结束了 开始提交Root
-        commitRoot()
+        commitRoot();
+        setTimeout(() => {
+            [...currentEffect].forEach(hook => {
+                debugger
+                if (hook.needCall) {
+                    const fn = hook.state;
+                    hook.unMountCallback = fn();
+                }
+                if (hook.willUnMount === true && typeof hook.unMountCallback === 'function') {
+                    hook.unMountCallback()
+                }
+            });
+            currentEffect = []
+        });
+
     }
 
 }
@@ -67,7 +83,7 @@ function performUnitOfWork(unitOfWork) {
         case FUNCTION_COMPONENT:
             workInProgressFiber = unitOfWork;
             workInProgressFiber.hooks = [];
-            hookIndex = 0;
+            unitOfWork.hookIndex = 0;
             const children = type(unitOfWork.props)
             reconcileChildren(unitOfWork, [isVirtualElement(children) ? children : createTextElement(children)])
             break;
@@ -209,6 +225,21 @@ function commitRoot() {
     }
 
     for (const deletion of deletions) {
+        console.log(deletion);
+        if (deletion.child) {        // 当组件嵌套时候,需要删除组件的child，如果是多层组件嵌套，需要优化
+            const parent = findParentFiber(deletion)
+            commitDeletion(parent.stateNode, deletion.child.stateNode)
+        }
+        // 处理组件卸载
+        if (deletion.hooks.length > 0) {
+            deletion.hooks.forEach((hook) => {
+                if (hook.type === 'effect') {
+                    debugger
+                    hook.willUnMount = true
+                }
+            })
+        }
+
         if (deletion.stateNode) {
             const parent = findParentFiber(deletion)
             commitDeletion(parent.stateNode, deletion.stateNode)
@@ -220,12 +251,12 @@ function commitRoot() {
         currentRoot = workInProgress
     }
 
-    workInProgress = null
+
 }
 
 function useState(initState) {
     // 获取当前的hook
-    const hook = workInProgressFiber?.alternate?.hooks ? workInProgressFiber.alternate.hooks[hookIndex] : { state: initState, queue: [] }
+    const hook = workInProgressFiber?.alternate?.hooks ? workInProgressFiber.alternate.hooks[workInProgressFiber.hookIndex] : { state: initState, queue: [], type: 'state' }
     // queue主要用于处理多个setState的情况
     while (hook.queue.length) {
         let newState = hook.queue.shift(); // 通过循环取出最后一次set的state
@@ -241,7 +272,7 @@ function useState(initState) {
     }
 
     workInProgressFiber.hooks.push(hook);
-    hookIndex++;
+    workInProgressFiber.hookIndex++;
 
     const setState = (value) => {
         hook.queue.push(value);
@@ -260,6 +291,37 @@ function useState(initState) {
     }
     return [hook.state, setState]
 
+}
+
+function useEffect(fn, deps) {
+    // if (deps?.length === 0) {
+    //     debugger
+    // }
+    const isMout = !workInProgressFiber?.alternate?.hooks;
+    let hook;
+    if (isMout) {
+        hook = { state: fn, deps, type: 'effect', willUnMount: false, needCall: true }
+        currentEffect.push(hook)
+    } else {
+        hook = workInProgressFiber.alternate.hooks[workInProgressFiber.hookIndex]
+        const prevDeps = hook.deps;
+        if (hook.deps === undefined) {
+            hook.needCall = true
+        } else if (deps.length > 0) {
+            const needNotUpdate = deps.every((dep, idx) => {
+                return dep === prevDeps[idx]
+            })
+            if (!needNotUpdate) {
+                hook.needCall = true
+            }
+        } else {
+            hook.needCall = false
+        }
+        currentEffect.push(hook)
+    }
+    hook.deps = Array.isArray(deps) ? [...deps] : deps
+    workInProgressFiber.hooks.push(hook);
+    workInProgressFiber.hookIndex++;
 }
 /**
  * 是否是虚拟DOM
@@ -343,7 +405,8 @@ const React = {
     createElement,
     render,
     Comment,
-    useState
+    useState,
+    useEffect
 }
 
 export default React;
